@@ -1,0 +1,21 @@
+# Your data -- never commit
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.log
+*.csv
+credentials*.json
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
