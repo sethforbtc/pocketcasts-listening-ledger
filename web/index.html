@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Listening Ledger</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="viz-root">
+<header class="top">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">◉</span>
+    <div>
+      <h1>Listening Ledger</h1>
+      <p class="muted" id="health-line">Loading…</p>
+    </div>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
+    <button role="tab" data-tab="reports">Reports &amp; export</button>
+    <button role="tab" data-tab="feeds">Feeds</button>
+    <button role="tab" data-tab="settings">Alerts &amp; health</button>
+  </nav>
+</header>
+
+<main>
+<!-- ============================ OVERVIEW ============================ -->
+<section id="tab-overview" class="tab-panel">
+  <div class="filters">
+    <label>Period
+      <select id="ov-period">
+        <option value="all">All time</option>
+        <option value="4:weeks">Last 4 weeks</option>
+        <option value="3:months">Last 3 months</option>
+        <option value="6:months">Last 6 months</option>
+        <option value="1:years">Last 12 months</option>
+      </select>
+    </label>
+    <label>Counts as completed at
+      <span class="inline"><input id="ov-threshold" type="number" min="5" max="100" step="5" value="75">%</span>
+    </label>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+  <p class="note" id="undated-note" hidden></p>
+
+  <div class="grid">
+    <article class="card wide">
+      <h2>Hours listened per week</h2>
+      <p class="sub">Credited to the week each episode was last played. Local time.</p>
+      <div class="chart" id="ch-weekly"></div>
+    </article>
+    <article class="card">
+      <h2>Top shows by hours</h2>
+      <p class="sub" id="top-sub"></p>
+      <div class="chart" id="ch-top"></div>
+    </article>
+    <article class="card">
+      <h2>How episodes ended</h2>
+      <p class="sub">Completed = at or above the threshold. Sampled = under 25%.</p>
+      <div id="completion"></div>
+    </article>
+    <article class="card wide">
+      <h2>When you listen</h2>
+      <p class="sub">Episodes by day and hour they were logged (within about an hour of when you played them).</p>
+      <div class="chart" id="ch-heat"></div>
+    </article>
+    <article class="card">
+      <h2>New shows per month</h2>
+      <p class="sub">Shows listened to for the first time.</p>
+      <div class="chart" id="ch-new"></div>
+    </article>
+    <article class="card">
+      <h2>Started, not finished</h2>
+      <p class="sub">Played 5% or more but under the threshold.</p>
+      <div class="table-wrap short" id="tbl-progress"></div>
+    </article>
+    <article class="card wide">
+      <h2>Recent listens</h2>
+      <div class="table-wrap" id="tbl-recent"></div>
+    </article>
+  </div>
+</section>
+
+<!-- ============================ REPORTS ============================ -->
+<section id="tab-reports" class="tab-panel" hidden>
+  <article class="card">
+    <h2>Build a report</h2>
+    <div class="form-grid">
+      <label>Report
+        <select id="rp-kind">
+          <option value="top_completed">Top shows by completed episodes</option>
+          <option value="top_hours">Top shows by hours listened</option>
+          <option value="recent">All shows in my most recent episodes</option>
+        </select>
+      </label>
+      <label><span id="rp-n-label">How many shows</span>
+        <input id="rp-n" type="number" min="1" max="500" value="10">
+      </label>
+      <label>Over the last
+        <span class="inline">
+          <input id="rp-period-n" type="number" min="1" max="520" value="3">
+          <select id="rp-unit">
+            <option value="weeks">weeks</option>
+            <option value="months" selected>months</option>
+            <option value="years">years</option>
+            <option value="all">— all time —</option>
+          </select>
+        </span>
+      </label>
+      <label id="rp-threshold-wrap">Completed at
+        <span class="inline"><input id="rp-threshold" type="number" min="5" max="100" step="5" value="75">%</span>
+      </label>
+      <label class="check"><input id="rp-initial" type="checkbox" checked> Include the initial import (exact dates unknown)</label>
+    </div>
+    <p class="sub" id="rp-desc"></p>
+    <div class="feed-warn" id="rp-feedwarn" hidden></div>
+    <div class="actions">
+      <button class="primary" data-dl="opml">Download OPML</button>
+      <button data-dl="csv">Download CSV</button>
+      <button data-dl="xlsx">Download Excel</button>
+    </div>
+    <div class="table-wrap" id="rp-table"></div>
+  </article>
+
+  <article class="card">
+    <h2>Export several at once</h2>
+    <p class="sub">Uses the period and threshold above. Each report keeps its own size.</p>
+    <div class="bundle">
+      <label class="check"><input type="checkbox" name="bundle" value="top_completed" checked> Top shows by completed episodes, top <input type="number" class="mini" id="bn-top_completed" value="10" min="1"></label>
+      <label class="check"><input type="checkbox" name="bundle" value="top_hours" checked> Top shows by hours, top <input type="number" class="mini" id="bn-top_hours" value="10" min="1"></label>
+      <label class="check"><input type="checkbox" name="bundle" value="recent" checked> Shows in my <input type="number" class="mini" id="bn-recent" value="25" min="1"> most recent episodes</label>
+      <label class="check"><input type="checkbox" id="bn-listens" checked> Every logged listen (raw data)</label>
+    </div>
+    <div class="actions">
+      <button class="primary" id="bn-xlsx">Excel workbook (one sheet each)</button>
+      <button id="bn-zip">CSV files (.zip)</button>
+    </div>
+  </article>
+</section>
+
+<!-- ============================ FEEDS ============================ -->
+<section id="tab-feeds" class="tab-panel" hidden>
+  <article class="card">
+    <h2>RSS feeds</h2>
+    <p class="sub">An OPML file needs each show's RSS feed URL, and Pocket Casts history doesn't include it. The ledger looks feeds up in Apple's podcast directory automatically, up to 10 shows each hour. Paste a URL yourself for any it can't match.</p>
+    <div class="actions">
+      <button class="primary" id="fd-resolve">Look up missing feeds now</button>
+      <span class="muted" id="fd-status"></span>
+    </div>
+    <div class="table-wrap" id="fd-table"></div>
+  </article>
+</section>
+
+<!-- ============================ SETTINGS ============================ -->
+<section id="tab-settings" class="tab-panel" hidden>
+  <div class="grid">
+    <article class="card">
+      <h2>Collector health</h2>
+      <div id="health"></div>
+    </article>
+    <article class="card">
+      <h2>Phone alerts (ntfy)</h2>
+      <p class="sub">Get a push notification when the hourly collector fails 3 times in a row, then about once a day until it recovers, plus a notice when it's working again. Setup steps are in <code>docs/ntfy.md</code>.</p>
+      <form id="ntfy-form" class="form-grid one">
+        <label>Topic name
+          <input id="ntfy-topic" placeholder="e.g. ledger-7f3k9q2xw" autocomplete="off" spellcheck="false">
+        </label>
+        <button type="button" id="ntfy-gen" class="link">Generate a random topic name</button>
+        <label>Server
+          <input id="ntfy-server" placeholder="https://ntfy.sh" spellcheck="false">
+        </label>
+        <div class="actions">
+          <button class="primary" type="submit">Save</button>
+          <button type="button" id="ntfy-test">Send test notification</button>
+          <span class="muted" id="ntfy-status"></span>
+        </div>
+      </form>
+    </article>
+  </div>
+</section>
+</main>
+
+<div id="tooltip" role="status" hidden></div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

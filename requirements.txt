@@ -1,2 +1,5 @@
 requests>=2.28
 keyring>=24
+flask>=3.0
+waitress>=3.0
+openpyxl>=3.1

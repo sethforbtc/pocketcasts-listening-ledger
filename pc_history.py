@@ -9,6 +9,9 @@ Usage:
     python pc_history.py                  # one polling run (what Task Scheduler calls)
     python pc_history.py --stats          # quick summary of what's been logged
     python pc_history.py --export-csv out.csv
+    python pc_history.py --set-ntfy TOPIC [--ntfy-server URL]   # failure alerts
+    python pc_history.py --test-notify    # send a test push notification
+    python pc_history.py --resolve-feeds  # look up RSS feed URLs (used for OPML export)
 
 Data lives in %LOCALAPPDATA%\\PocketCastsLogger by default
 (override with the PC_LOGGER_DIR environment variable).
@@ -41,9 +44,31 @@ DATA_DIR = Path(
 DB_PATH = DATA_DIR / "pocketcasts_history.db"
 LOG_PATH = DATA_DIR / "logger.log"
 
-# Optional: push a phone notification on failure via https://ntfy.sh
-# Set NTFY_TOPIC to a hard-to-guess topic name and subscribe to it in the ntfy iOS app.
-NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
+CONFIG_PATH = DATA_DIR / "config.json"
+
+# --------------------------------------------------------------------------- #
+# Config (ntfy settings etc.) -- stored in the data folder, never in the repo
+# --------------------------------------------------------------------------- #
+
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def save_config(cfg: dict):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+def ntfy_settings() -> tuple[str | None, str, str | None]:
+    """(topic, server, token). Environment variables override config.json."""
+    cfg = load_config()
+    topic = os.environ.get("NTFY_TOPIC") or cfg.get("ntfy_topic")
+    server = (os.environ.get("NTFY_SERVER") or cfg.get("ntfy_server") or "https://ntfy.sh").rstrip("/")
+    token = os.environ.get("NTFY_TOKEN") or cfg.get("ntfy_token")
+    return topic, server, token
 
 log = logging.getLogger("pc_history")
 
@@ -104,6 +129,19 @@ CREATE TABLE IF NOT EXISTS listen_events (
 CREATE TABLE IF NOT EXISTS last_snapshot (
     position        INTEGER PRIMARY KEY,
     episode_uuid    TEXT NOT NULL
+);
+
+-- One row per show: RSS feed URL lookup cache, used for OPML export.
+CREATE TABLE IF NOT EXISTS podcasts (
+    podcast_uuid    TEXT PRIMARY KEY,
+    title           TEXT,
+    author          TEXT,
+    feed_url        TEXT,
+    site_url        TEXT,
+    feed_source     TEXT,        -- 'itunes' | 'manual' | 'notfound'
+    itunes_id       INTEGER,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    resolved_utc    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS state (
@@ -382,18 +420,21 @@ def run_once(con, episodes: list[dict] | None = None) -> dict:
     return {"returned": len(current), "new_episodes": new_eps, "listen_events": len(new_play_idx)}
 
 
-def notify(msg: str):
-    if not NTFY_TOPIC:
-        return
+def notify(msg: str, title: str = "Pocket Casts Ledger", priority: str = "default",
+           tags: str = "warning") -> tuple[bool, str]:
+    """Send a push via ntfy. Returns (ok, detail). Never raises."""
+    topic, server, token = ntfy_settings()
+    if not topic:
+        return False, "No ntfy topic configured"
+    headers = {"Title": title, "Priority": priority, "Tags": tags}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     try:
-        requests.post(
-            f"https://ntfy.sh/{NTFY_TOPIC}",
-            data=msg.encode("utf-8"),
-            headers={"Title": "Pocket Casts logger"},
-            timeout=15,
-        )
-    except requests.RequestException:
-        pass
+        r = requests.post(f"{server}/{topic}", data=msg.encode("utf-8"),
+                          headers=headers, timeout=15)
+        return r.ok, f"HTTP {r.status_code}"
+    except requests.RequestException as e:
+        return False, repr(e)
 
 
 # --------------------------------------------------------------------------- #
@@ -430,8 +471,19 @@ def cmd_setup():
 def cmd_poll():
     con = connect()
     try:
+        prev_fails = int(get_state(con, "consecutive_failures", "0"))
         res = run_once(con)
         log.info("OK: %s", res)
+        if prev_fails >= 3:
+            notify(f"Back to normal after {prev_fails} failed runs.",
+                   title="Pocket Casts Ledger recovered", tags="white_check_mark")
+        try:  # best effort: fill in RSS feed URLs for OPML export
+            import ledger_reports
+            n = ledger_reports.resolve_missing_feeds(con, limit=10)
+            if n:
+                log.info("Resolved %d feed URL(s)", n)
+        except Exception:  # noqa: BLE001
+            log.exception("Feed resolution failed (non-fatal)")
     except Exception as e:  # noqa: BLE001
         con.rollback()
         fails = int(get_state(con, "consecutive_failures", "0")) + 1
@@ -443,7 +495,8 @@ def cmd_poll():
         log.exception("Run failed (%d in a row)", fails)
         # Alert on the 3rd consecutive failure, then every 24 failures (~daily if hourly).
         if fails == 3 or (fails > 3 and fails % 24 == 0):
-            notify(f"Logger has failed {fails} times in a row. Last error: {e}")
+            notify(f"{fails} failed runs in a row. Last error: {str(e)[:300]}",
+                   title="Pocket Casts Ledger is failing", priority="high")
         sys.exit(1)
 
 
@@ -485,7 +538,31 @@ def main():
     p.add_argument("--setup", action="store_true", help="store credentials and do the first import")
     p.add_argument("--stats", action="store_true", help="print a summary")
     p.add_argument("--export-csv", metavar="PATH", help="export all listens to CSV")
+    p.add_argument("--set-ntfy", metavar="TOPIC", help="save the ntfy topic for failure alerts ('' to clear)")
+    p.add_argument("--ntfy-server", metavar="URL", help="ntfy server (default https://ntfy.sh)")
+    p.add_argument("--test-notify", action="store_true", help="send a test notification")
+    p.add_argument("--resolve-feeds", action="store_true", help="look up missing RSS feed URLs now")
     a = p.parse_args()
+    if a.set_ntfy is not None or a.ntfy_server:
+        cfg = load_config()
+        if a.set_ntfy is not None:
+            cfg["ntfy_topic"] = a.set_ntfy.strip() or None
+        if a.ntfy_server:
+            cfg["ntfy_server"] = a.ntfy_server.strip()
+        save_config(cfg)
+        print(f"Saved to {CONFIG_PATH}")
+        if not a.test_notify:
+            return
+    if a.test_notify:
+        ok, detail = notify("Test from Pocket Casts Listening Ledger. Alerts are working.",
+                            title="Pocket Casts Ledger test", tags="bell")
+        print(("Sent" if ok else "FAILED") + f": {detail}")
+        sys.exit(0 if ok else 1)
+    if a.resolve_feeds:
+        import ledger_reports
+        n = ledger_reports.resolve_missing_feeds(connect(), limit=1000, verbose=True)
+        print(f"Resolved {n} feed URL(s).")
+        return
     if a.setup:
         cmd_setup()
     elif a.stats:
