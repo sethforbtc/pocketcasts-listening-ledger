@@ -141,7 +141,7 @@ def test_credentials(key: str, secret: str) -> tuple[bool, str]:
     try:
         get("search/byterm", key=key, secret=secret, q="podcasting 2.0", max=1)
         return True, "OK"
-    except PermissionError as e:
+    except (PermissionError, NotConfigured) as e:
         return False, str(e)
     except requests.RequestException as e:
         return False, repr(e)

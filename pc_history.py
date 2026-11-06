@@ -552,16 +552,57 @@ def cmd_export(path: str):
     print(f"Exported to {path}")
 
 
+def read_clipboard() -> str | None:
+    """Text on the clipboard, or None. Uses only tools built into the OS."""
+    import subprocess
+    if sys.platform == "win32":
+        cmds = [["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"]]
+    elif sys.platform == "darwin":
+        cmds = [["pbpaste"]]
+    else:
+        cmds = [["wl-paste", "--no-newline"], ["xclip", "-selection", "clipboard", "-o"],
+                ["xsel", "--clipboard", "--output"]]
+    for cmd in cmds:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode == 0:
+            return r.stdout
+    return None
+
+
 def cmd_set_podcastindex():
     import podcast_index as pi
     print("Get a free key at https://api.podcastindex.org/signup (it's emailed to you).")
-    key = input("Podcast Index API key (leave blank to remove the saved key): ").strip()
+    key = "".join(ch for ch in input("Podcast Index API key (leave blank to remove the saved key): ")
+                  if ch.isprintable()).strip()
     if not key:
         pi.clear_credentials()
         print("Removed. Podcast Index features are off.")
         return
-    raw = getpass.getpass("Podcast Index API secret (input is hidden): ")
-    secret = "".join(ch for ch in raw if ch.isprintable()).strip()
+    print(f"Key received: {len(key)} characters.")
+    secret = ""
+    for _ in range(3):
+        raw = getpass.getpass("Copy the API secret from the email, then press Enter here "
+                              "(or type it; input is hidden): ")
+        # Ctrl+V in a hidden Windows prompt types '\x16' instead of pasting. Strip such characters.
+        secret = "".join(ch for ch in raw if ch.isprintable()).strip()
+        source = "typed"
+        if not secret:
+            secret = "".join(ch for ch in (read_clipboard() or "") if ch.isprintable()).strip()
+            source = "from your clipboard"
+        if secret and " " not in secret and secret != key:
+            print(f"Secret received {source}: {len(secret)} characters. Compare that with the email.")
+            break
+        if secret == key:
+            print("Your clipboard still holds the API key. Copy the secret, then press Enter.")
+        else:
+            print("Couldn't get the secret. Copy just the secret (no spaces), then press Enter.")
+        secret = ""
+    if not secret:
+        print("No secret entered; nothing was saved.")
+        sys.exit(1)
     ok, detail = pi.test_credentials(key, secret)
     if not ok:
         print(f"That key didn't work: {detail}")

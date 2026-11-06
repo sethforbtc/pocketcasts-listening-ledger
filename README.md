@@ -225,6 +225,7 @@ Setup:
 #    Podcast Index doesn't accept sign-ups from free email services, so use an address
 #    on your own domain or one tied to your project.
 python pc_history.py --set-podcastindex     # tests and saves the key, then matches your shows
+#    When it asks for the secret, copy it from the email and just press Enter: it reads your clipboard.
 
 # 2. The digest goes out through ntfy, so set a topic if you haven't
 python pc_history.py --set-ntfy your-secret-topic-name
