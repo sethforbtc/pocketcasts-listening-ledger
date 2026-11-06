@@ -16,6 +16,7 @@ Pocket Casts only keeps your listening history for a limited time, and old entri
 - [Reports](#reports)
 - [Feeds and OPML](#feeds-and-opml)
 - [Alerts](#alerts)
+- [Podcast Index (optional)](#podcast-index-optional)
 - [Command line](#command-line)
 - [Configuration](#configuration)
 - [Data model](#data-model)
@@ -34,6 +35,8 @@ Pocket Casts only keeps your listening history for a limited time, and old entri
 - **OPML export.** Turn any report into a podcast subscription list you can import into any podcast app. RSS feed URLs are looked up for you automatically.
 - **Excel and CSV export.** Any report, several reports at once (one sheet each, or a zip of CSVs), or the full raw log.
 - **Failure alerts.** Get a push notification through [ntfy](https://ntfy.sh) when runs keep failing, and another when they recover. See [docs/ntfy.md](docs/ntfy.md).
+- **New-episode digest (optional).** One ntfy push a day listing new episodes from the shows you actually listen to (your top shows by hours), not everything you subscribe to. Needs a free [Podcast Index](https://podcastindex.org) API key.
+- **Better feed matching (optional).** With a Podcast Index key, shows Apple's directory can't match are looked up in Podcast Index too, and each show's Podcast Index id and `podcast:guid` are saved.
 - **Health at a glance.** Every dashboard page shows whether the collector is working and when it last checked.
 
 ## Requirements
@@ -152,12 +155,13 @@ CSV files include a UTF-8 byte-order mark so Excel opens show names with accents
 
 ### Feeds
 
-Lists every show with its episode count, where its feed URL came from (`itunes`, `manual`, `no match`, or `not looked up`), and an editable feed URL box. Paste a URL and click away to save it; clear the box to remove it. **Look up missing feeds now** checks up to 40 shows at once (about 3 seconds each). See [Feeds and OPML](#feeds-and-opml).
+Lists every show with its episode count, where its feed URL came from (`itunes`, `podcastindex`, `manual`, `no match`, or `not looked up`), and an editable feed URL box. Paste a URL and click away to save it; clear the box to remove it. **Look up missing feeds now** checks up to 40 shows at once (about 3 seconds each). See [Feeds and OPML](#feeds-and-opml).
 
 ### Alerts & health
 
 - **Collector health:** status, last success, failures in a row, OK and failed runs in the last 24 hours, how many shows have feeds on file, the data folder location, and the full error from the last run if it failed.
 - **Phone alerts (ntfy):** generate a random topic name, set the server, save, and send a test notification. Topic names may contain only letters, numbers, `-` and `_` (up to 64 characters). Full walkthrough: [docs/ntfy.md](docs/ntfy.md).
+- **New-episode digest:** save a Podcast Index key, turn the daily digest on, pick how many top shows it checks and the hour it goes out, then **Preview** or **Send now**. See [Podcast Index (optional)](#podcast-index-optional).
 
 ### Using it from your phone
 
@@ -189,6 +193,7 @@ OPML files list each show's **RSS feed URL**, and Pocket Casts history doesn't i
 - It accepts only **confident matches**: when the show's author is known, the title *and* the author have to match; without an author, the title has to match exactly.
 - Each show gets **up to 3 attempts** before it's left as `notfound`.
 - Lookups are spaced about 3 seconds apart to stay within Apple's rate limit.
+- With a [Podcast Index key](#podcast-index-optional), a show Apple can't match is also searched in Podcast Index, with the same matching rules, skipping feeds Podcast Index marks as dead. Shows Apple had already given up on get one Podcast Index try once you add a key.
 - A feed URL you paste on the **Feeds** tab is marked `manual` and is never overwritten by a lookup.
 
 Shows without a feed are left out of the OPML file and listed in a comment at the top of it, so you can see what's missing. To look up everything at once from the command line, run `python pc_history.py --resolve-feeds`.
@@ -204,7 +209,36 @@ With an [ntfy](https://ntfy.sh) topic set, the collector sends a push notificati
 | It starts working again after 3+ failures | **Pocket Casts Ledger recovered** |
 | You ask for a test | **Pocket Casts Ledger test** |
 
-Alerts contain only the failure count and error text, never your listening data or credentials. Setup, privacy options and troubleshooting: [docs/ntfy.md](docs/ntfy.md).
+Failure alerts contain only the failure count and error text, never your listening data or credentials. The optional [new-episode digest](#podcast-index-optional) is different: it lists new episodes from your top shows, so it does show which shows you listen to most. Setup, privacy options and troubleshooting: [docs/ntfy.md](docs/ntfy.md).
+
+## Podcast Index (optional)
+
+[Podcast Index](https://podcastindex.org) is an open podcast directory with a free API. Adding a key turns on two things:
+
+1. **Feed fallback.** Shows Apple's directory can't match are searched in Podcast Index. Every show with a feed also gets its Podcast Index feed id and `podcast:guid` recorded (up to 25 shows per hourly run). The guid stays the same when a show moves to a new host.
+2. **New-episode digest.** Once a day, the collector checks your top shows by hours (default: top 15 over the last 3 months) for episodes published since the last digest, leaves out anything already in your Pocket Casts history, and sends one ntfy push. If there's nothing new, nothing is sent.
+
+Setup:
+
+```bash
+# 1. Get a free key and secret at https://api.podcastindex.org/signup (they're emailed to you).
+#    Podcast Index doesn't accept sign-ups from free email services, so use an address
+#    on your own domain or one tied to your project.
+python pc_history.py --set-podcastindex     # tests and saves the key, then matches your shows
+
+# 2. The digest goes out through ntfy, so set a topic if you haven't
+python pc_history.py --set-ntfy your-secret-topic-name
+
+# 3. Turn the digest on
+python pc_history.py --digest on            # optional: --digest-shows 15 --digest-hour 7
+python pc_history.py --digest-preview       # see what it would send right now
+```
+
+The hourly collector sends the digest on its first run at or after the digest hour (local time, default 7). Each digest covers everything published since the previous one, up to a week back. If a send fails, the next run tries again with the same window. You can also do all of this from the **Alerts & health** tab.
+
+Without a key, everything else works as before.
+
+**Staying within Podcast Index's [terms](https://api.podcastindex.org/tos_accept).** The ledger only looks up shows from your own listening history, saves what it finds so it doesn't ask twice, and spaces its requests at least a second apart. The first catch-up after you add a key can take a few minutes for a large history. Every request carries a User-Agent that names this project. Keep your key private: it lives in your credential store, never in the repo, and anyone else running this code should register their own.
 
 ## Command line
 
@@ -217,6 +251,11 @@ python pc_history.py --resolve-feeds    # look up all missing RSS feed URLs
 python pc_history.py --set-ntfy TOPIC   # save the ntfy topic for alerts ("" to clear)
 python pc_history.py --set-ntfy TOPIC --ntfy-server https://ntfy.example.com   # self-hosted ntfy
 python pc_history.py --test-notify      # send a test alert
+python pc_history.py --set-podcastindex # save a Podcast Index API key (blank to remove)
+python pc_history.py --digest on        # daily new-episode digest ("off" to stop)
+python pc_history.py --digest-shows 15 --digest-hour 7   # how many top shows, and when
+python pc_history.py --digest-preview   # show what the digest would send, without sending
+python pc_history.py --digest-now       # send the digest now
 ```
 
 Flags can be combined, for example `--set-ntfy TOPIC --test-notify` saves the topic and sends a test. A polling run that fails exits with code 1, so schedulers can see the failure.
@@ -234,7 +273,7 @@ The database, log file and settings live in your user data folder:
 |---|---|
 | `pocketcasts_history.db` | The SQLite database (see [Data model](#data-model)). |
 | `logger.log` | One line per run, plus full tracebacks for failures. |
-| `config.json` | ntfy settings (`ntfy_topic`, `ntfy_server`, `ntfy_token`). |
+| `config.json` | ntfy settings (`ntfy_topic`, `ntfy_server`, `ntfy_token`) and digest settings (`digest_enabled`, `digest_shows`, `digest_months`, `digest_hour`). |
 
 Environment variables:
 
@@ -242,8 +281,9 @@ Environment variables:
 |---|---|
 | `PC_LOGGER_DIR` | Use a different data folder. |
 | `NTFY_TOPIC`, `NTFY_SERVER`, `NTFY_TOKEN` | ntfy settings; these override `config.json`. `NTFY_TOKEN` is an access token for a protected topic. |
+| `PODCASTINDEX_KEY`, `PODCASTINDEX_SECRET` | Podcast Index API key and secret; these override the stored ones. |
 
-Your email, password and login token are stored in the OS credential store under the service name `PocketCastsLogger`, not in the data folder.
+Your email, password, login token and Podcast Index key are stored in the OS credential store under the service name `PocketCastsLogger`, not in the data folder.
 
 ## Data model
 
@@ -252,10 +292,10 @@ Your email, password and login token are stored in the OS credential store under
 | `v_listens` | **Start here.** One row per listen, with show, episode, % played, and status at the time it was logged and now. |
 | `listen_events` | One row each time an episode reaches the top of your history (a first listen or a re-listen), with the time window it happened in. |
 | `episodes` | One row per episode ever seen: metadata, latest progress, starred flag, and the raw API record (`raw_json`). |
-| `podcasts` | One row per show: the RSS feed URL used for OPML, where it came from (`itunes`, `manual`, or `notfound`), and lookup attempts. |
+| `podcasts` | One row per show: the RSS feed URL used for OPML, where it came from (`itunes`, `podcastindex`, `manual`, or `notfound`), lookup attempts, and the Podcast Index `pi_feed_id` and `podcast_guid` when known. |
 | `runs` | Every polling run: success or failure, counts, and error text. |
 | `last_snapshot` | Your history order as of the last successful run, used to work out what's new. |
-| `state` | Bookkeeping: last successful run and failures in a row. |
+| `state` | Bookkeeping: last successful run, failures in a row, and when the last digest was checked. |
 
 ### How listen times work
 
@@ -291,7 +331,9 @@ The dashboard's data is available as JSON, if you want to script against it or s
 | `GET /api/feeds` | Every show and its feed URL. |
 | `POST /api/feeds/resolve` | Look up missing feeds. Body: `{"limit": 15, "podcast_uuids": [...]}` (both optional; limit is capped at 40). |
 | `POST /api/feeds/<podcast_uuid>` | Set or clear a feed URL. Body: `{"feed_url": "https://..."}`. |
-| `GET` / `POST /api/settings` | Read or save ntfy settings. |
+| `GET` / `POST /api/settings` | Read or save ntfy and digest settings (`digest_enabled`, `digest_shows`, `digest_hour`). |
+| `POST /api/podcastindex` | Test and save a Podcast Index key: `{"key": "...", "secret": "..."}`, or `{"clear": true}` to remove it. |
+| `POST /api/digest/preview` | What the digest would send right now. `POST /api/digest/send` sends it. |
 | `POST /api/notify/test` | Send a test notification. |
 | `GET /export/report.{opml,csv,xlsx}` | Download one report (same options as `/api/report`). |
 | `GET /export/bundle.{xlsx,zip}` | Download several: `reports=top_completed,top_hours,recent`, per-report sizes `n_top_completed` etc., and `listens=1` for the raw log. |
@@ -302,7 +344,8 @@ The dashboard's data is available as JSON, if you want to script against it or s
 |---|---|---|
 | `api.pocketcasts.com` | Your email and password (to log in) and your login token (to read history) | Every run |
 | `itunes.apple.com` | A show's title (used to find its RSS feed) | Feed lookups only |
-| Your ntfy server (`ntfy.sh` by default) | The failure count and error text | Only when an alert fires or you send a test |
+| `api.podcastindex.org` | Show titles, feed URLs and Apple ids of shows you've listened to (to match feeds and check for new episodes) | Only if you've added a Podcast Index key. Podcast Index keeps API logs for 90 days. |
+| Your ntfy server (`ntfy.sh` by default) | The failure count and error text; for the digest, the titles of new episodes from your top shows | When an alert fires, the daily digest has something new, or you send a test |
 
 Nothing else is sent anywhere. Your listening data stays in the local database.
 

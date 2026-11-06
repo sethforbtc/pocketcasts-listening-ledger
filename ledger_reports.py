@@ -17,6 +17,8 @@ from xml.sax.saxutils import escape, quoteattr
 
 import requests
 
+import podcast_index as pi
+
 UA = "PocketCastsListeningLedger/1.0 (personal use)"
 
 UNITS = {"weeks": 7.0, "months": 30.44, "years": 365.25}
@@ -274,6 +276,19 @@ def _norm(s: str | None) -> str:
     return " ".join(s.split())
 
 
+def _match_key(title: str, author: str | None, cand_title: str | None,
+               cand_authors: list[str | None]) -> tuple | None:
+    """Score a directory result against a show. None means "not a confident match":
+    when we know the author it must match; without one the title must match exactly."""
+    nt, na, rt = _norm(title), _norm(author), _norm(cand_title)
+    title_score = 3 if rt == nt else 1 if nt and rt and (nt in rt or rt in nt) else 0
+    ras = [_norm(a) for a in cand_authors if a]
+    author_ok = bool(na and any(ra and (na == ra or na in ra or ra in na) for ra in ras))
+    if not title_score or (na and not author_ok) or (not na and title_score < 3):
+        return None
+    return (title_score + (2 if author_ok else 0), -abs(len(rt) - len(nt)))
+
+
 def lookup_feed(title: str, author: str | None) -> dict | None:
     """Find a show's RSS feed via the free iTunes Search API."""
     r = requests.get(
@@ -283,19 +298,11 @@ def lookup_feed(title: str, author: str | None) -> dict | None:
     )
     r.raise_for_status()
     best, best_key = None, None
-    nt, na = _norm(title), _norm(author)
     for res in r.json().get("results", []):
         if not res.get("feedUrl"):
             continue
-        rt, ra = _norm(res.get("collectionName")), _norm(res.get("artistName"))
-        title_score = 3 if rt == nt else 1 if nt and (nt in rt or rt in nt) else 0
-        author_ok = bool(na and ra and (na == ra or na in ra or ra in na))
-        # Accept only confident matches: when we know the author it must match;
-        # without an author the title must match exactly.
-        if not title_score or (na and not author_ok) or (not na and title_score < 3):
-            continue
-        key = (title_score + (2 if author_ok else 0), -abs(len(rt) - len(nt)))
-        if best_key is None or key > best_key:
+        key = _match_key(title, author, res.get("collectionName"), [res.get("artistName")])
+        if key and (best_key is None or key > best_key):
             best, best_key = res, key
     if best:
         return {"feed_url": best["feedUrl"], "site_url": best.get("collectionViewUrl"),
@@ -303,50 +310,142 @@ def lookup_feed(title: str, author: str | None) -> dict | None:
     return None
 
 
-def resolve_missing_feeds(con, limit: int = 10, verbose: bool = False,
-                          only: list[str] | None = None) -> int:
-    """Look up feed URLs for shows that don't have one yet. Returns how many were found."""
+def lookup_feed_podcastindex(title: str, author: str | None) -> dict | None:
+    """Fallback: search Podcast Index, with the same confidence rules. Skips dead feeds."""
+    best, best_key = None, None
+    for f in pi.search(title):
+        if not f.get("url") or f.get("dead"):
+            continue
+        key = _match_key(title, author, f.get("title"), [f.get("author"), f.get("ownerName")])
+        if key and (best_key is None or key > best_key):
+            best, best_key = f, key
+    return _pi_fields(best) if best else None
+
+
+def _pi_fields(f: dict) -> dict:
+    return {"feed_url": f.get("url"), "site_url": f.get("link"),
+            "itunes_id": f.get("itunesId") or None,
+            "pi_feed_id": f.get("id"), "podcast_guid": f.get("podcastGuid") or None}
+
+
+def _now() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _seed_podcasts(con):
     con.execute(
         """INSERT OR IGNORE INTO podcasts(podcast_uuid, title)
            SELECT podcast_uuid, MAX(podcast_title) FROM episodes
            WHERE podcast_uuid IS NOT NULL GROUP BY podcast_uuid"""
     )
+    con.commit()  # don't hold the write lock while we make network calls
+
+
+def resolve_missing_feeds(con, limit: int = 10, verbose: bool = False,
+                          only: list[str] | None = None) -> int:
+    """Look up feed URLs for shows that don't have one yet. Returns how many were found.
+
+    Apple's directory is tried first (up to 3 times per show). If it can't match
+    a show and a Podcast Index key is set up, Podcast Index is searched once."""
+    _seed_podcasts(con)
     authors = dict(con.execute(
         """SELECT podcast_uuid, author FROM episodes WHERE author IS NOT NULL
            GROUP BY podcast_uuid, author ORDER BY COUNT(*)"""
     ).fetchall())  # last (most common) author wins
-    sql = """SELECT podcast_uuid, title FROM podcasts
-             WHERE feed_url IS NULL AND COALESCE(feed_source,'') != 'manual' AND attempts < 3"""
-    params: list = []
+    use_pi = pi.configured()
+    sql = """SELECT podcast_uuid, title, attempts FROM podcasts
+             WHERE feed_url IS NULL AND COALESCE(feed_source,'') != 'manual'
+               AND (attempts < 3 OR (? AND pi_checked_utc IS NULL))"""
+    params: list = [1 if use_pi else 0]
     if only:
         sql += f" AND podcast_uuid IN ({','.join('?' * len(only))})"
-        params = list(only)
+        params += list(only)
     todo = con.execute(sql + " ORDER BY attempts, title LIMIT ?", params + [limit]).fetchall()
     found = 0
-    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
-    for i, (uuid, title) in enumerate(todo):
-        if i:
-            time.sleep(3)  # iTunes allows ~20 requests/minute
+    itunes_calls = 0
+    for uuid, title, attempts in todo:
         author = authors.get(uuid)
-        try:
-            hit = lookup_feed(title or "", author)
-        except requests.RequestException as e:
-            if verbose:
-                print(f"  ! {title}: {e}")
-            continue
+        hit, source, tried_pi = None, None, False
+        if attempts < 3:
+            if itunes_calls:
+                time.sleep(3)  # iTunes allows ~20 requests/minute
+            itunes_calls += 1
+            try:
+                hit = lookup_feed(title or "", author)
+                source = "itunes" if hit else None
+            except requests.RequestException as e:
+                if verbose:
+                    print(f"  ! {title} (Apple): {e}")
+                if not use_pi:
+                    continue
+        if not hit and use_pi:
+            try:
+                hit = lookup_feed_podcastindex(title or "", author)
+                source = "podcastindex" if hit else None
+                tried_pi = True
+            except (requests.RequestException, PermissionError) as e:
+                if verbose:
+                    print(f"  ! {title} (Podcast Index): {e}")
+        now = _now()
         if hit:
             found += 1
             con.execute(
                 """UPDATE podcasts SET feed_url=?, site_url=?, itunes_id=?, author=?,
-                   feed_source='itunes', attempts=attempts+1, resolved_utc=? WHERE podcast_uuid=?""",
-                (hit["feed_url"], hit["site_url"], hit["itunes_id"], author, now, uuid))
+                   feed_source=?, attempts=attempts+1, resolved_utc=?,
+                   pi_feed_id=COALESCE(?, pi_feed_id), podcast_guid=COALESCE(?, podcast_guid),
+                   pi_checked_utc=CASE WHEN ? THEN ? ELSE pi_checked_utc END
+                   WHERE podcast_uuid=?""",
+                (hit["feed_url"], hit["site_url"], hit["itunes_id"], author, source, now,
+                 hit.get("pi_feed_id"), hit.get("podcast_guid"),
+                 1 if tried_pi else 0, now, uuid))
         else:
             con.execute(
-                """UPDATE podcasts SET feed_source='notfound', author=?, attempts=attempts+1,
-                   resolved_utc=? WHERE podcast_uuid=?""", (author, now, uuid))
+                """UPDATE podcasts SET feed_source='notfound', author=?,
+                   attempts=CASE WHEN attempts < 3 THEN attempts+1 ELSE attempts END,
+                   resolved_utc=?, pi_checked_utc=CASE WHEN ? THEN ? ELSE pi_checked_utc END
+                   WHERE podcast_uuid=?""", (author, now, 1 if tried_pi else 0, now, uuid))
         con.commit()
         if verbose:
-            print(f"  {'✓' if hit else '✗'} {title}" + (f" -> {hit['feed_url']}" if hit else ""))
+            via = f" [{source}]" if hit else ""
+            print(f"  {'✓' if hit else '✗'} {title}" + (f" -> {hit['feed_url']}{via}" if hit else ""))
+    return found
+
+
+def enrich_feed_ids(con, limit: int = 25, only: list[str] | None = None,
+                    verbose: bool = False) -> int:
+    """Record the Podcast Index feed id and podcast:guid for shows that already
+    have a feed URL. Looks up by Apple id when known, otherwise by feed URL.
+    Shows Podcast Index doesn't know are re-checked after 30 days."""
+    if not pi.configured():
+        return 0
+    _seed_podcasts(con)
+    month_ago = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).isoformat()
+    sql = """SELECT podcast_uuid, title, feed_url, itunes_id FROM podcasts
+             WHERE feed_url IS NOT NULL AND pi_feed_id IS NULL
+               AND (pi_checked_utc IS NULL OR pi_checked_utc < ?)"""
+    params: list = [month_ago]
+    if only:
+        sql += f" AND podcast_uuid IN ({','.join('?' * len(only))})"
+        params += list(only)
+    todo = con.execute(sql + " ORDER BY title LIMIT ?", params + [limit]).fetchall()
+    found = 0
+    for uuid, title, feed_url, itunes_id in todo:
+        try:
+            f = pi.feed_by_itunes_id(itunes_id) if itunes_id else None
+            if not f:
+                f = pi.feed_by_url(feed_url)
+        except (requests.RequestException, PermissionError) as e:
+            if verbose:
+                print(f"  ! {title}: {e}")
+            continue
+        con.execute(
+            """UPDATE podcasts SET pi_feed_id=?, podcast_guid=COALESCE(?, podcast_guid),
+               pi_checked_utc=? WHERE podcast_uuid=?""",
+            (f.get("id") if f else None, (f or {}).get("podcastGuid") or None, _now(), uuid))
+        con.commit()
+        found += 1 if f else 0
+        if verbose:
+            print(f"  {'✓' if f else '✗'} {title}" + (f" -> feed id {f.get('id')}" if f else ""))
     return found
 
 
@@ -354,9 +453,11 @@ def set_feed(con, podcast_uuid: str, feed_url: str | None):
     con.execute("INSERT OR IGNORE INTO podcasts(podcast_uuid, title) "
                 "SELECT podcast_uuid, MAX(podcast_title) FROM episodes WHERE podcast_uuid=?",
                 (podcast_uuid,))
-    con.execute("UPDATE podcasts SET feed_url=?, feed_source=?, resolved_utc=? WHERE podcast_uuid=?",
-                (feed_url or None, "manual" if feed_url else None,
-                 dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(), podcast_uuid))
+    # A new URL may be a different feed, so forget the old Podcast Index ids.
+    con.execute("""UPDATE podcasts SET feed_url=?, feed_source=?, resolved_utc=?,
+                   pi_feed_id=NULL, podcast_guid=NULL, pi_checked_utc=NULL
+                   WHERE podcast_uuid=?""",
+                (feed_url or None, "manual" if feed_url else None, _now(), podcast_uuid))
     con.commit()
 
 

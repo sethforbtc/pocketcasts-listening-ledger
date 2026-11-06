@@ -20,8 +20,10 @@ from pathlib import Path
 
 from flask import Flask, Response, abort, jsonify, request, send_from_directory
 
+import digest
 import ledger_reports as lr
 import pc_history as pc
+import podcast_index as pi
 
 WEB_DIR = Path(__file__).parent / "web"
 app = Flask(__name__, static_folder=None)
@@ -125,8 +127,13 @@ def api_feed_set(uuid):
 @app.get("/api/settings")
 def api_settings():
     topic, server, token = pc.ntfy_settings()
+    con = db()
+    last = con.execute("SELECT value FROM state WHERE key='last_digest_date'").fetchone()
     return jsonify({"ntfy_topic": topic or "", "ntfy_server": server,
-                    "ntfy_token_set": bool(token), "data_dir": str(pc.DATA_DIR)})
+                    "ntfy_token_set": bool(token), "data_dir": str(pc.DATA_DIR),
+                    "podcastindex_configured": pi.configured(),
+                    "last_digest_date": last[0] if last else None,
+                    **digest.settings(pc.load_config())})
 
 
 @app.post("/api/settings")
@@ -142,8 +149,56 @@ def api_settings_save():
         cfg["ntfy_server"] = body["ntfy_server"].strip().rstrip("/")
     if "ntfy_token" in body:
         cfg["ntfy_token"] = body["ntfy_token"].strip() or None
+    if "digest_enabled" in body:
+        cfg["digest_enabled"] = bool(body["digest_enabled"])
+    for k, lo, hi in (("digest_shows", 1, 100), ("digest_hour", 0, 23)):
+        if k in body:
+            try:
+                v = int(body[k])
+            except (TypeError, ValueError):
+                abort(400, f"{k} must be a whole number")
+            if not lo <= v <= hi:
+                abort(400, f"{k} must be between {lo} and {hi}")
+            cfg[k] = v
     pc.save_config(cfg)
     return api_settings()
+
+
+@app.post("/api/podcastindex")
+def api_podcastindex():
+    body = request.get_json(silent=True) or {}
+    if body.get("clear"):
+        pi.clear_credentials()
+        return jsonify({"ok": True, "configured": False})
+    key, secret = (body.get("key") or "").strip(), (body.get("secret") or "").strip()
+    if not (key and secret):
+        abort(400, "Enter both the API key and the secret.")
+    ok, detail = pi.test_credentials(key, secret)
+    if not ok:
+        abort(400, f"That key didn't work: {detail}")
+    pi.save_credentials(key, secret)
+    con = db()
+    found = lr.resolve_missing_feeds(con, limit=40)
+    matched = lr.enrich_feed_ids(con, limit=40)  # the hourly runs pick up the rest
+    return jsonify({"ok": True, "configured": True, "found": found, "matched": matched})
+
+
+def _digest_json(d):
+    return {k: d[k] for k in ("shows_checked", "shows_unmatched", "period", "episodes",
+                              "sent", "detail") if k in d}
+
+
+@app.post("/api/digest/<action>")
+def api_digest(action):
+    if not pi.configured():
+        abort(400, "Add a Podcast Index API key first.")
+    s = digest.settings(pc.load_config())
+    con = db()
+    if action == "preview":
+        return jsonify(_digest_json(digest.build(con, s["digest_shows"], s["digest_months"])))
+    if action == "send":
+        return jsonify(_digest_json(digest.send(con, pc.notify, s["digest_shows"], s["digest_months"])))
+    abort(404)
 
 
 @app.post("/api/notify/test")

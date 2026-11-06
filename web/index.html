@@ -144,7 +144,7 @@
 <section id="tab-feeds" class="tab-panel" hidden>
   <article class="card">
     <h2>RSS feeds</h2>
-    <p class="sub">An OPML file needs each show's RSS feed URL, and Pocket Casts history doesn't include it. The ledger looks feeds up in Apple's podcast directory automatically, up to 10 shows each hour. Paste a URL yourself for any it can't match.</p>
+    <p class="sub">An OPML file needs each show's RSS feed URL, and Pocket Casts history doesn't include it. The ledger looks feeds up in Apple's podcast directory automatically, up to 10 shows each hour, and then in Podcast Index if you've added a key (Alerts &amp; health tab). Paste a URL yourself for any it can't match.</p>
     <div class="actions">
       <button class="primary" id="fd-resolve">Look up missing feeds now</button>
       <span class="muted" id="fd-status"></span>
@@ -177,6 +177,39 @@
           <span class="muted" id="ntfy-status"></span>
         </div>
       </form>
+    </article>
+    <article class="card">
+      <h2>New-episode digest</h2>
+      <p class="sub">Once a day, get one ntfy push listing new episodes from the shows you actually listen to: your top shows by hours over the last 3 months, not everything you subscribe to. Episodes already in your Pocket Casts history are left out. Uses the free <a href="https://api.podcastindex.org/signup" target="_blank" rel="noopener">Podcast Index API</a>, which also finds feeds Apple's directory misses.</p>
+      <p><span id="pi-badge"></span> <button type="button" id="pi-clear" class="link">Remove saved key</button></p>
+      <form id="pi-form" class="form-grid one">
+        <label>Podcast Index API key
+          <input id="pi-key" autocomplete="off" spellcheck="false">
+        </label>
+        <label>API secret
+          <input id="pi-secret" type="password" autocomplete="off" spellcheck="false">
+        </label>
+        <div class="actions">
+          <button type="submit">Save key</button>
+          <span class="muted" id="pi-status"></span>
+        </div>
+      </form>
+      <form id="digest-form" class="form-grid one">
+        <label class="check"><input type="checkbox" id="dg-enabled"> Send the digest every day</label>
+        <label>Number of top shows to check
+          <input type="number" class="mini" id="dg-shows" min="1" max="100">
+        </label>
+        <label>Send on the first collector run after (hour, 0–23)
+          <input type="number" class="mini" id="dg-hour" min="0" max="23">
+        </label>
+        <div class="actions">
+          <button class="primary" type="submit">Save</button>
+          <button type="button" id="dg-preview">Preview</button>
+          <button type="button" id="dg-send">Send now</button>
+          <span class="muted" id="dg-status"></span>
+        </div>
+      </form>
+      <div class="table-wrap" id="dg-table"></div>
     </article>
   </div>
 </section>

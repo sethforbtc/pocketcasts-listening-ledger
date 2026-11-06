@@ -11,7 +11,7 @@
 | It starts working again | **Pocket Casts Ledger recovered** |
 | You press "Send test notification" | **Pocket Casts Ledger test** |
 
-The alerts contain only the failure count and the error message. They never include your listening data or your credentials.
+Failure alerts contain only the failure count and the error message. They never include your listening data or your credentials. If you turn on the optional new-episode digest (see the README), it is sent to the same topic and lists new episodes from your top shows, which shows which podcasts you listen to most. Use a hard-to-guess topic name or a protected topic.
 
 ## How ntfy works (and why the topic name matters)
 

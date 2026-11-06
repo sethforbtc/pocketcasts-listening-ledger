@@ -162,3 +162,5 @@ pre.err { white-space: pre-wrap; background: var(--surface-2); padding: 8px; bor
   box-shadow: 0 4px 14px rgba(0,0,0,.14); max-width: 280px;
 }
 #tooltip b { display: block; font-weight: 600; margin-bottom: 2px; }
+
+[hidden] { display: none !important; }

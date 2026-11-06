@@ -325,7 +325,59 @@ async function loadSettings() {
     ${h.last_run && !h.last_run.ok ? `<pre class="err">${esc(h.last_run.error)}</pre>` : ""}`;
   $("#ntfy-topic").value = cfg.ntfy_topic;
   $("#ntfy-server").value = cfg.ntfy_server;
+  renderDigestSettings(cfg);
 }
+function renderDigestSettings(cfg) {
+  $("#pi-badge").innerHTML = cfg.podcastindex_configured
+    ? `<span class="pill ok">Podcast Index key saved</span>`
+    : `<span class="pill miss">No Podcast Index key yet</span>`;
+  $("#pi-form").hidden = cfg.podcastindex_configured;
+  $("#pi-clear").hidden = !cfg.podcastindex_configured;
+  $("#dg-enabled").checked = cfg.digest_enabled;
+  $("#dg-shows").value = cfg.digest_shows;
+  $("#dg-hour").value = cfg.digest_hour;
+  $("#dg-status").textContent = cfg.last_digest_date ? `Last checked ${cfg.last_digest_date}.` : "";
+}
+$("#pi-form").onsubmit = async (e) => {
+  e.preventDefault();
+  $("#pi-status").textContent = "Checking the key and matching your shows (this can take a minute)…";
+  try {
+    const r = await post("/api/podcastindex", { key: $("#pi-key").value, secret: $("#pi-secret").value });
+    $("#pi-key").value = $("#pi-secret").value = "";
+    $("#pi-status").textContent = `Saved. Found ${r.found} more feed(s); matched ${r.matched} show(s).`;
+    renderDigestSettings(await api("/api/settings"));
+  } catch (err) { $("#pi-status").textContent = err.message; }
+};
+$("#pi-clear").onclick = async () => {
+  await post("/api/podcastindex", { clear: true });
+  renderDigestSettings(await api("/api/settings"));
+};
+$("#digest-form").onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    await post("/api/settings", { digest_enabled: $("#dg-enabled").checked, digest_shows: $("#dg-shows").value, digest_hour: $("#dg-hour").value });
+    $("#dg-status").textContent = "Saved.";
+  } catch (err) { $("#dg-status").textContent = err.message; }
+};
+async function runDigest(action) {
+  $("#dg-status").textContent = action === "send" ? "Sending…" : "Checking your shows…";
+  try {
+    const d = await post(`/api/digest/${action}`);
+    const n = d.episodes.length;
+    let msg = `Checked ${d.shows_checked} shows: ${n} new episode${n === 1 ? "" : "s"}.`;
+    if (action === "send") msg += d.sent ? " Sent." : ` Not sent (${d.detail}).`;
+    if (d.shows_unmatched.length) msg += ` Couldn't check: ${d.shows_unmatched.join(", ")}.`;
+    $("#dg-status").textContent = msg;
+    table($("#dg-table"), [
+      { label: "Show", wrap: true, get: (r) => r.podcast_title },
+      { label: "Episode", wrap: true, html: (r) => (r.link ? `<a href="${esc(r.link)}" target="_blank" rel="noopener">${esc(r.episode_title)}</a>` : esc(r.episode_title)) },
+      { label: "Published", get: (r) => when(r.published_utc) },
+      { label: "Length", num: true, get: (r) => mins(r.duration_sec) },
+    ], d.episodes, "Nothing new since the last digest.");
+  } catch (err) { $("#dg-status").textContent = err.message; }
+}
+$("#dg-preview").onclick = () => runDigest("preview");
+$("#dg-send").onclick = () => runDigest("send");
 $("#ntfy-gen").onclick = () => {
   const a = new Uint8Array(10); crypto.getRandomValues(a);
   $("#ntfy-topic").value = "ledger-" + [...a].map((b) => "abcdefghijkmnpqrstuvwxyz23456789"[b % 32]).join("");

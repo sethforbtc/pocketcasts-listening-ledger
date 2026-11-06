@@ -12,6 +12,9 @@ Usage:
     python pc_history.py --set-ntfy TOPIC [--ntfy-server URL]   # failure alerts
     python pc_history.py --test-notify    # send a test push notification
     python pc_history.py --resolve-feeds  # look up RSS feed URLs (used for OPML export)
+    python pc_history.py --set-podcastindex   # optional: Podcast Index API key
+    python pc_history.py --digest on      # daily push of new episodes from your top shows
+    python pc_history.py --digest-now     # send the digest right now
 
 Data lives in %LOCALAPPDATA%\\PocketCastsLogger by default
 (override with the PC_LOGGER_DIR environment variable).
@@ -138,10 +141,13 @@ CREATE TABLE IF NOT EXISTS podcasts (
     author          TEXT,
     feed_url        TEXT,
     site_url        TEXT,
-    feed_source     TEXT,        -- 'itunes' | 'manual' | 'notfound'
+    feed_source     TEXT,        -- 'itunes' | 'podcastindex' | 'manual' | 'notfound'
     itunes_id       INTEGER,
     attempts        INTEGER NOT NULL DEFAULT 0,
-    resolved_utc    TEXT
+    resolved_utc    TEXT,
+    pi_feed_id      INTEGER,     -- Podcast Index feed id (used by the new-episode digest)
+    podcast_guid    TEXT,        -- podcast:guid, stays the same if the show changes host
+    pi_checked_utc  TEXT         -- when Podcast Index was last asked about this show
 );
 
 CREATE TABLE IF NOT EXISTS state (
@@ -182,7 +188,17 @@ def connect() -> sqlite3.Connection:
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
     con.executescript(SCHEMA)
+    _migrate(con)
     return con
+
+
+def _migrate(con):
+    """Add columns that newer versions introduced to databases made by older ones."""
+    have = {r[1] for r in con.execute("PRAGMA table_info(podcasts)")}
+    for col, typ in (("pi_feed_id", "INTEGER"), ("podcast_guid", "TEXT"), ("pi_checked_utc", "TEXT")):
+        if col not in have:
+            con.execute(f"ALTER TABLE podcasts ADD COLUMN {col} {typ}")
+    con.commit()
 
 
 def get_state(con, key, default=None):
@@ -482,8 +498,17 @@ def cmd_poll():
             n = ledger_reports.resolve_missing_feeds(con, limit=10)
             if n:
                 log.info("Resolved %d feed URL(s)", n)
+            n = ledger_reports.enrich_feed_ids(con, limit=25)
+            if n:
+                log.info("Matched %d show(s) to Podcast Index", n)
         except Exception:  # noqa: BLE001
             log.exception("Feed resolution failed (non-fatal)")
+        try:  # best effort: once-a-day new-episode digest
+            import digest
+            if ntfy_settings()[0]:
+                digest.maybe_send(con, load_config(), notify)
+        except Exception:  # noqa: BLE001
+            log.exception("Digest failed (non-fatal)")
     except Exception as e:  # noqa: BLE001
         con.rollback()
         fails = int(get_state(con, "consecutive_failures", "0")) + 1
@@ -527,6 +552,68 @@ def cmd_export(path: str):
     print(f"Exported to {path}")
 
 
+def cmd_set_podcastindex():
+    import podcast_index as pi
+    print("Get a free key at https://api.podcastindex.org/signup (it's emailed to you).")
+    key = input("Podcast Index API key (leave blank to remove the saved key): ").strip()
+    if not key:
+        pi.clear_credentials()
+        print("Removed. Podcast Index features are off.")
+        return
+    raw = getpass.getpass("Podcast Index API secret (input is hidden): ")
+    secret = "".join(ch for ch in raw if ch.isprintable()).strip()
+    ok, detail = pi.test_credentials(key, secret)
+    if not ok:
+        print(f"That key didn't work: {detail}")
+        sys.exit(1)
+    pi.save_credentials(key, secret)
+    print("Key works and is saved to your credential store. Matching your shows...")
+    import ledger_reports
+    con = connect()
+    found = ledger_reports.resolve_missing_feeds(con, limit=1000, verbose=True)
+    matched = ledger_reports.enrich_feed_ids(con, limit=1000)
+    print(f"Found {found} more feed URL(s); matched {matched} show(s) to Podcast Index.")
+
+
+def cmd_digest(a):
+    import digest
+    cfg = load_config()
+    changed = False
+    if a.digest is not None:
+        cfg["digest_enabled"] = a.digest == "on"
+        changed = True
+    if a.digest_shows is not None:
+        cfg["digest_shows"] = a.digest_shows
+        changed = True
+    if a.digest_hour is not None:
+        cfg["digest_hour"] = a.digest_hour
+        changed = True
+    if changed:
+        save_config(cfg)
+    s = digest.settings(cfg)
+    print(f"Digest: {'on' if s['digest_enabled'] else 'off'} | top {s['digest_shows']} shows by hours "
+          f"(last {s['digest_months']} months) | sent on the first run after {s['digest_hour']}:00")
+    import podcast_index as pi
+    if not pi.configured():
+        print("Note: needs a Podcast Index key first:  python pc_history.py --set-podcastindex")
+    if not ntfy_settings()[0]:
+        print("Note: needs an ntfy topic first:  python pc_history.py --set-ntfy TOPIC")
+    if a.digest_now or a.digest_preview:
+        if not pi.configured():
+            sys.exit(1)
+        con = connect()
+        if a.digest_preview:
+            d = digest.build(con, s["digest_shows"], s["digest_months"])
+            d["detail"] = "preview only, nothing sent"
+        else:
+            d = digest.send(con, notify, s["digest_shows"], s["digest_months"])
+        print(f"\nChecked {d['shows_checked']} shows; {len(d['episodes'])} new episode(s). ({d['detail']})")
+        if d["episodes"]:
+            print(digest.format_message(d))
+        if d["shows_unmatched"]:
+            print("Couldn't check (no Podcast Index match): " + ", ".join(d["shows_unmatched"]))
+
+
 def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
@@ -542,7 +629,20 @@ def main():
     p.add_argument("--ntfy-server", metavar="URL", help="ntfy server (default https://ntfy.sh)")
     p.add_argument("--test-notify", action="store_true", help="send a test notification")
     p.add_argument("--resolve-feeds", action="store_true", help="look up missing RSS feed URLs now")
+    p.add_argument("--set-podcastindex", action="store_true", help="save a Podcast Index API key (optional)")
+    p.add_argument("--digest", choices=["on", "off"], help="turn the daily new-episode digest on or off")
+    p.add_argument("--digest-shows", type=int, metavar="N", help="how many top shows the digest checks (default 15)")
+    p.add_argument("--digest-hour", type=int, metavar="H", help="local hour (0-23) to send the digest (default 7)")
+    p.add_argument("--digest-now", action="store_true", help="send the digest now")
+    p.add_argument("--digest-preview", action="store_true", help="show what the digest would send, without sending")
     a = p.parse_args()
+    if a.set_podcastindex:
+        cmd_set_podcastindex()
+        return
+    if (a.digest is not None or a.digest_shows is not None or a.digest_hour is not None
+            or a.digest_now or a.digest_preview):
+        cmd_digest(a)
+        return
     if a.set_ntfy is not None or a.ntfy_server:
         cfg = load_config()
         if a.set_ntfy is not None:
@@ -560,8 +660,12 @@ def main():
         sys.exit(0 if ok else 1)
     if a.resolve_feeds:
         import ledger_reports
-        n = ledger_reports.resolve_missing_feeds(connect(), limit=1000, verbose=True)
+        con = connect()
+        n = ledger_reports.resolve_missing_feeds(con, limit=1000, verbose=True)
         print(f"Resolved {n} feed URL(s).")
+        m = ledger_reports.enrich_feed_ids(con, limit=1000, verbose=True)
+        if m:
+            print(f"Matched {m} show(s) to Podcast Index.")
         return
     if a.setup:
         cmd_setup()
